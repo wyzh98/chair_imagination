@@ -12,7 +12,7 @@ import time
 import subprocess
 import trimesh
 import csv
-import meshlabxml as mlx
+# import meshlabxml as mlx
 import numpy as np
 import re
 

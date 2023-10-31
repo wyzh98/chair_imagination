@@ -18,7 +18,8 @@ import csv
 from utils import rotm2angle, rotm2quat
 
 # Evaluate pose for chair object
-preprocess = True
+preprocess = False
+checkprocess = True
 stable_pose_imagination = True
 functional_pose_imagination = True
 benchmark = True
@@ -27,14 +28,14 @@ transform_folder = "transform_230831_100000"
 rotation = "Exponential"
 sitting_num_threshold = 0
 
-agent_urdf = "./doc/humanoid_revolute_new.urdf"
+agent_urdf = "../doc/humanoid_revolute_new.urdf"
 
 save_csv_file = [
             "results/test_chairs_synthetic.csv",
                 ]
 
-obj_dir = [ 
-            "/home/xin/Dropbox/chair_imagination_release/data/",
+obj_dir = [
+            "../data_test/",
             ]
 
 
@@ -44,10 +45,10 @@ meshlab_output_txt = "./doc/meshlab_output.txt"
 meshlabserver_exe = "/home/xin/lib/meshlab-Meshlab-2020.03/distrib/meshlabserver"
 
 # Chair stability
-CS = ChairStabilityMatrix(check_process=False)
+CS = ChairStabilityMatrix(check_process=checkprocess, mp4_dir='/videos')
 
 # Chair Functionality
-CF = ChairFunctionalityMatrix(agent_urdf=agent_urdf, check_process=False)
+CF = ChairFunctionalityMatrix(agent_urdf=agent_urdf, check_process=checkprocess, mp4_dir='/videos')
 
 
 for dir_idx, obj_folder in enumerate(obj_dir):
