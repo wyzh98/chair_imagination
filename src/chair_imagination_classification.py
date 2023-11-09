@@ -8,6 +8,7 @@ import time
 import os
 
 from chair_functionality_matrix import ChairFunctionalityMatrix
+from chair_functionality_precheck import ChairFunctionalityPrecheck
 from chair_stability_matrix import ChairStabilityMatrix
 import preprocessing
 import trimesh
@@ -23,19 +24,20 @@ checkprocess = True
 stable_pose_imagination = True
 functional_pose_imagination = True
 benchmark = True
-transform_folder = "transform_230831_100000"
+transform_folder = "transform_final"
 # transform_folder = "transform"
 rotation = "Exponential"
 sitting_num_threshold = 0
 
 agent_urdf = "../doc/humanoid_revolute_new.urdf"
+cube_urdf = "../doc/cube.urdf"
 
 save_csv_file = [
-            "results/test_chairs_synthetic.csv",
+            "results/test_chairs_synthetic-178.csv",
                 ]
 
 obj_dir = [
-            "../data_test/",
+            "../chair_test_single/",
             ]
 
 
@@ -48,6 +50,7 @@ meshlabserver_exe = "/home/xin/lib/meshlab-Meshlab-2020.03/distrib/meshlabserver
 CS = ChairStabilityMatrix(check_process=checkprocess, mp4_dir='/videos')
 
 # Chair Functionality
+CFP = ChairFunctionalityPrecheck(cube_urdf=cube_urdf, check_process=checkprocess, mp4_dir='/videos')
 CF = ChairFunctionalityMatrix(agent_urdf=agent_urdf, check_process=checkprocess, mp4_dir='/videos')
 
 
@@ -56,10 +59,7 @@ for dir_idx, obj_folder in enumerate(obj_dir):
     print("Total object number: ", len(obj_name_list))
     tested_obj_num = 0
 
-    if 'non_chairs' in obj_folder:
-        evaluate_pose = False
-    else:
-        evaluate_pose = True
+    evaluate_pose = False
 
     with open(save_csv_file[dir_idx], 'w') as csvfile:
         writer = csv.writer(csvfile)
@@ -117,14 +117,16 @@ for dir_idx, obj_folder in enumerate(obj_dir):
             # ------------------------------------------------------
             if stable_pose_imagination:
                 stable_orn, stable_pos, stable_orn_eul = CS.get_stable_pose(obj_transform_urdf, obj_transform_mesh)
-                # stable_orn, stable_pos, stable_orn_eul = CS.get_stable_pose_baseline(obj_transform_urdf, obj_transform_mesh)
                 stable_pose_imagination_time = time.time() - start_time - preprocessing_time
             # ------------------------------------------------------
 
             # Functional pose imagination
             # ------------------------------------------------------
             if functional_pose_imagination:
-                sitting_correct, total_sitting_score = CF.get_functional_pose(obj_transform_urdf, obj_transform_mesh, stable_orn_eul, stable_pos)
+                stable_directions = CFP.get_posterior_distrib(obj_transform_urdf, obj_transform_mesh, stable_orn_eul, stable_pos)
+                sitting_correct, total_sitting_score = CF.get_functional_pose(obj_transform_urdf, obj_transform_mesh,
+                                                                              stable_orn_eul, stable_pos,
+                                                                              stable_directions, CFP)
                 functional_pose_imagination_time = time.time() - start_time - preprocessing_time - stable_pose_imagination_time
             # ------------------------------------------------------
 

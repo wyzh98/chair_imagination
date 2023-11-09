@@ -2,6 +2,9 @@
 This script is written for finding the stable pose of the chair with its physical property in pybullet.
 '''
 from __future__ import print_function
+
+import time
+
 import pybullet as p
 import pybullet_data
 import numpy as np

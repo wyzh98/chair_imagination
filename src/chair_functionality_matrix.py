@@ -10,6 +10,8 @@ import pybullet_data
 import numpy as np
 import math
 import os
+import copy
+import time
 import trimesh
 from imagination import ImaginationMatrix
 
@@ -33,7 +35,7 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
 
         # Hyperparameter
         self.simulation_iter = 500
-        self.chair_rotate_iteration = 18
+        self.chair_rotate_iteration = 9
         self.x_chair_num_functional = 3
         self.y_chair_num_functional = 3
         self.episode_num = 2
@@ -140,7 +142,7 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
 
         return curr_link_weight
 
-    def agent_drop_setup(self, humanoid_id, humanoid_start_pos, humanoid_start_orn):
+    def agent_drop_setup(self, humanoid_id, humanoid_start_pos, humanoid_start_orn, humanoid_start_vel_x=None):
         """Set up the agent for dropping.
         
         Args:
@@ -150,6 +152,8 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
         """
 
         p.resetBasePositionAndOrientation(humanoid_id, humanoid_start_pos, humanoid_start_orn)
+        if humanoid_start_vel_x is not None:
+            p.resetBaseVelocity(humanoid_id, [humanoid_start_vel_x, 0, 0])
 
         # Chest
         p.resetJointState(humanoid_id, self.chest_rotx_id, 0.0)
@@ -285,7 +289,7 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
             p.changeDynamics(agent_id, link_idx, lateralFriction=1.0)
         return agent_id
 
-    def get_functional_pose(self, obj_urdf, obj_transform_mesh, stable_orn, stable_pos):
+    def get_functional_pose(self, obj_urdf, obj_transform_mesh, stable_orn, stable_pos, stable_directions, precheck_cls):
         """Find the functional pose among a list of equivalently stable poses.
 
         Args:
@@ -294,6 +298,8 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
             stable_orn: a list of stable orientation of the object
             stable_pos: a list of stable position of the object. It corresponds 
                 with stable_orn.
+            stable_directions: a dict of stable index to stable throwing directions.
+            precheck_cls: chair precheck class.
         Returns:
             functional_pose_orn: functional pose orientation in quaternion (x, y, z, w)
             functional_pose_pos: functional pose position
@@ -342,7 +348,7 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
                     basePosition=[chair_start_x, chair_start_y, 0.0],
                     baseOrientation=p.getQuaternionFromEuler([0.0, 0.0, 0.0]))
 
-                p.changeDynamics(chair_id, -1, restitution=0.0)
+                p.changeDynamics(chair_id, -1, restitution=0.0, mass=0)  # set chair static
                 p.changeDynamics(chair_id, -1, lateralFriction=self.chair_friction_coeff)
 
                 self.chair_id_list.append(chair_id)
@@ -367,13 +373,15 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
         max_sitting_config_score = 0
 
         # Save mp4 video
-        if (self.mp4_dir is not None) and (self.check_process):
+        if (self.mp4_dir is not None) and self.check_process:
             obj_name = obj_urdf.split('/')[-1].split('.')[0]
             mp4_file_name = obj_name + "_chair_imagination.mp4"
             mp4_file_path = os.path.join(self.mp4_dir, mp4_file_name)
             p.startStateLogging(p.STATE_LOGGING_VIDEO_MP4, mp4_file_path)
 
         for chair_stable_idx, chair_stable_orn in enumerate(stable_orn):
+            if not stable_directions[chair_stable_idx]:
+                continue
             chair_stable_pos = stable_pos[chair_stable_idx]
             chair_start_pos = [0.0, 0.0, chair_stable_pos[-1]]
 
@@ -385,121 +393,143 @@ class ChairFunctionalityMatrix(ImaginationMatrix):
 
             p.setGravity(0, 0, -10)
 
-            for ep_idx in range(self.episode_num):
-                for j in range(self.human_ind_num):
-                    for x_idx in range(self.x_chair_num_functional):
-                        for y_idx in range(self.y_chair_num_functional):
-                            chair_rotate_idx = y_idx + x_idx * self.y_chair_num_functional
+            for j in range(self.human_ind_num):
+                throw_indices = copy.deepcopy(stable_directions[chair_stable_idx])
+                if precheck_cls.throw_directions in throw_indices:
+                    throw_indices.remove(precheck_cls.throw_directions)
+                for x_idx in range(self.x_chair_num_functional):
+                    for y_idx in range(self.y_chair_num_functional):
+                        idx = y_idx + x_idx * self.y_chair_num_functional
+                        if not throw_indices:  # only top drop
+                            chair_z_axis_angle = idx * 2 * math.pi / precheck_cls.throw_directions
+                            side_throw = False
+                        elif idx < len(throw_indices):
+                            chair_z_axis_angle = throw_indices[idx] * 2 * math.pi / precheck_cls.throw_directions
+                            side_throw = True
+                        else:
+                            # chair_z_axis_angle = throw_indices[idx % len(throw_indices)] * 2 * math.pi / precheck_cls.throw_directions
+                            if precheck_cls.throw_directions - len(throw_indices) != 0:
+                                chair_z_axis_angle = (idx - len(throw_indices)) * 2 * math.pi / (precheck_cls.throw_directions - len(throw_indices))
+                            else:
+                                chair_z_axis_angle = 0
+                            # chair_z_axis_angle += np.random.randn() * math.pi / 36  # sample with std=5deg
+                            side_throw = False
+                        chair_start_orn = [chair_stable_orn[0], chair_stable_orn[1], chair_z_axis_angle]
 
-                            chair_z_axis_angle = -(y_idx + x_idx * self.y_chair_num_functional + \
-                                ep_idx * self.x_chair_num_functional * self.y_chair_num_functional) * 2 * math.pi / self.chair_rotate_iteration
-                            chair_start_orn = [chair_stable_orn[0], chair_stable_orn[1], chair_z_axis_angle]
+                        chair_stable_orn_mat = np.reshape(
+                            np.array(p.getMatrixFromQuaternion(p.getQuaternionFromEuler(chair_start_orn))), (3, 3))
+                        chair_initial_center = np.copy(chair_curr_pos)
+                        chair_center = np.dot(chair_stable_orn_mat, chair_initial_center)
+                        chair_start_pos[0] = chair_center[0] + x_idx * self.chair_adj_dist
+                        chair_start_pos[1] = chair_center[1] + y_idx * self.chair_adj_dist
 
-                            chair_stable_orn_mat = np.reshape(np.array(p.getMatrixFromQuaternion(p.getQuaternionFromEuler(chair_start_orn))), (3, 3))
-                            chair_initial_center = np.copy(chair_curr_pos)
-                            chair_center = np.dot(chair_stable_orn_mat, chair_initial_center)
-                            chair_start_pos[0] = chair_center[0] + x_idx * self.chair_adj_dist
-                            chair_start_pos[1] = chair_center[1] + y_idx * self.chair_adj_dist
+                        p.resetBasePositionAndOrientation(self.chair_id_list[idx],
+                                                          chair_start_pos,
+                                                          p.getQuaternionFromEuler(chair_start_orn))
 
-                            p.resetBasePositionAndOrientation(self.chair_id_list[chair_rotate_idx], 
-                                                            chair_start_pos,
-                                                            p.getQuaternionFromEuler(chair_start_orn))
+                        chair_aabb = p.getAABB(self.chair_id_list[idx])
+                        chair_bbox_largest = chair_aabb[1][2]
 
-                            chair_aabb = p.getAABB(self.chair_id_list[chair_rotate_idx])
-                            chair_bbox_largest = chair_aabb[1][2]
+                        # humanoid facing x direction
+                        if side_throw:
+                            hamanoid_dx = (chair_bbox_largest + 0.15) * math.sqrt(2) / 2
+                            humanoid_z = (chair_bbox_largest + 0.15) * math.sqrt(2) / 2
+                            humanoid_start_vel_x = -math.sqrt(1 * 10 * humanoid_z)
+                        else:
+                            hamanoid_dx = 0
+                            humanoid_z = chair_bbox_largest + 0.15
+                            humanoid_start_vel_x = 0
+                        humanoid_id = self.agent_id_list[idx]
+                        humanoid_start_pos = ((j) * human_ind + x_idx * self.chair_adj_dist + hamanoid_dx,
+                                              y_idx * self.chair_adj_dist,
+                                              humanoid_z)
+                        humanoid_start_orn = p.getQuaternionFromEuler([math.pi / 2, 0, 0])
+                        self.agent_drop_setup(humanoid_id, humanoid_start_pos, humanoid_start_orn, humanoid_start_vel_x)
 
-                            # humanoid facing x direction
-                            humanoid_id = self.agent_id_list[chair_rotate_idx]
-                            humanoid_start_pos = ((j) * human_ind + x_idx * self.chair_adj_dist, 
-                                                y_idx * self.chair_adj_dist, 
-                                                chair_bbox_largest + 0.15)
-                            humanoid_start_orn = p.getQuaternionFromEuler([math.pi / 2, 0, 0])
-                            self.agent_drop_setup(humanoid_id, humanoid_start_pos, humanoid_start_orn)
-                           
-                    for i in range(int(self.simulation_iter)):
-                        p.stepSimulation()
+                for i in range(int(self.simulation_iter)):
+                    p.stepSimulation()
 
-                    # Check each sitting
-                    for x_idx in range(self.x_chair_num_functional):
-                        for y_idx in range(self.y_chair_num_functional):
-                            chair_rotate_idx = y_idx + x_idx * self.y_chair_num_functional
-                            agent_id = self.agent_id_list[chair_rotate_idx]
-                            chair_id = self.chair_id_list[chair_rotate_idx]
+                # Check each sitting
+                for x_idx in range(self.x_chair_num_functional):
+                    for y_idx in range(self.y_chair_num_functional):
+                        idx = y_idx + x_idx * self.y_chair_num_functional
+                        agent_id = self.agent_id_list[idx]
+                        chair_id = self.chair_id_list[idx]
 
-                            #######################################
-                            # Joint Angle Score
-                            sitting = []
-                            for joint_idx in range(p.getNumJoints(agent_id)):
-                                joint_state = p.getJointState(agent_id, joint_idx)
-                                sitting.append(joint_state[0])
-                            sitting = np.array(sitting)
+                        #######################################
+                        # Joint Angle Score
+                        sitting = []
+                        for joint_idx in range(p.getNumJoints(agent_id)):
+                            joint_state = p.getJointState(agent_id, joint_idx)
+                            sitting.append(joint_state[0])
+                        sitting = np.array(sitting)
 
-                            sitting_weight = self.joint_angle_limit_check(sitting)
-                            distance_wrt_normal_sitting = np.multiply(sitting_weight,
-                                                                    np.subtract(sitting, self.normal_sitting))
-                            joint_angle_score = np.sum(np.absolute(distance_wrt_normal_sitting))
+                        sitting_weight = self.joint_angle_limit_check(sitting)
+                        distance_wrt_normal_sitting = np.multiply(sitting_weight,
+                                                                np.subtract(sitting, self.normal_sitting))
+                        joint_angle_score = np.sum(np.absolute(distance_wrt_normal_sitting))
 
-                            #######################################
-                            # Link Score
-                            if joint_angle_score < self.joint_angle_score_max:
-                                link_score = self.get_link_scores(agent_id)
-                                curr_link_weight = self.absolute_link_limit_check(link_score)
-                                absolute_link_state_score = np.sum(np.multiply(link_score, curr_link_weight))[0]
+                        #######################################
+                        # Link Score
+                        if joint_angle_score < self.joint_angle_score_max:
+                            link_score = self.get_link_scores(agent_id)
+                            curr_link_weight = self.absolute_link_limit_check(link_score)
+                            absolute_link_state_score = np.sum(np.multiply(link_score, curr_link_weight))[0]
 
-                            #######################################
-                            # Contact points
-                                if absolute_link_state_score < self.absolute_link_state_score_max:
-                                    head_contact_point = p.getContactPoints(chair_id, agent_id, -1, self.neck_rotz_id)
-                                    head_contact_num = len(head_contact_point)
-                                    # print("head contact point number: ", head_contact_num)
-                                    chest_contact_point = p.getContactPoints(chair_id, agent_id, -1, self.chest_rotz_id)
-                                    chest_contact_num = len(chest_contact_point)
-                                    # print("chest contact point number: ", chest_contact_num)
-                                    left_hip_contact_point = p.getContactPoints(chair_id, agent_id, -1, 
-                                        self.left_hip_rotz_id)
-                                    left_hip_contact_num = len(left_hip_contact_point)
-                                    # print("left hip contact point number: ", left_hip_contact_num)
-                                    right_hip_contact_point = p.getContactPoints(chair_id, agent_id, -1,
-                                        self.right_hip_rotz_id)
-                                    right_hip_contact_num = len(right_hip_contact_point)
-                                    # print("right hip contact point number: ", right_hip_contact_num)
+                        #######################################
+                        # Contact points
+                            if absolute_link_state_score < self.absolute_link_state_score_max:
+                                head_contact_point = p.getContactPoints(chair_id, agent_id, -1, self.neck_rotz_id)
+                                head_contact_num = len(head_contact_point)
+                                # print("head contact point number: ", head_contact_num)
+                                chest_contact_point = p.getContactPoints(chair_id, agent_id, -1, self.chest_rotz_id)
+                                chest_contact_num = len(chest_contact_point)
+                                # print("chest contact point number: ", chest_contact_num)
+                                left_hip_contact_point = p.getContactPoints(chair_id, agent_id, -1,
+                                    self.left_hip_rotz_id)
+                                left_hip_contact_num = len(left_hip_contact_point)
+                                # print("left hip contact point number: ", left_hip_contact_num)
+                                right_hip_contact_point = p.getContactPoints(chair_id, agent_id, -1,
+                                    self.right_hip_rotz_id)
+                                right_hip_contact_num = len(right_hip_contact_point)
+                                # print("right hip contact point number: ", right_hip_contact_num)
 
-                                    left_shoulder_contact_point = p.getContactPoints(chair_id, agent_id, -1, 
-                                        self.left_shoulder_rotx_id)
-                                    left_shoulder_contact_num = len(left_shoulder_contact_point)
-                                    right_shoulder_contact_point = p.getContactPoints(chair_id, agent_id, -1,
-                                        self.right_shoulder_rotx_id)
-                                    right_shoulder_contact_num = len(right_shoulder_contact_point)
+                                left_shoulder_contact_point = p.getContactPoints(chair_id, agent_id, -1,
+                                    self.left_shoulder_rotx_id)
+                                left_shoulder_contact_num = len(left_shoulder_contact_point)
+                                right_shoulder_contact_point = p.getContactPoints(chair_id, agent_id, -1,
+                                    self.right_shoulder_rotx_id)
+                                right_shoulder_contact_num = len(right_shoulder_contact_point)
 
-                                    # total_contact_number = chest_contact_num + head_contact_num + \
-                                    #     left_hip_contact_num + right_hip_contact_num
-                                    total_contact_number = chest_contact_num + head_contact_num + \
-                                        left_hip_contact_num + right_hip_contact_num + \
-                                        left_shoulder_contact_num + right_shoulder_contact_num
+                                # total_contact_number = chest_contact_num + head_contact_num + \
+                                #     left_hip_contact_num + right_hip_contact_num
+                                total_contact_number = chest_contact_num + head_contact_num + \
+                                    left_hip_contact_num + right_hip_contact_num + \
+                                    left_shoulder_contact_num + right_shoulder_contact_num
 
-                            #######################################
-                            # Sitting height
-                                    # if (chest_contact_num + head_contact_num) * left_hip_contact_num * right_hip_contact_num > 0 \
-                                    #     and total_contact_number >= self.total_contact_num_min:
-                                    upper_body_contact_num = chest_contact_num + head_contact_num + left_hip_contact_num + right_shoulder_contact_num
-                                    if upper_body_contact_num * left_hip_contact_num * right_hip_contact_num > 0 \
-                                        and total_contact_number >= self.total_contact_num_min:
-                                        left_hip_height_list = np.array([left_hip_contact_point[i][6][-1]
-                                            for i, _ in enumerate(left_hip_contact_point)])
-                                        right_hip_height_list = np.array([right_hip_contact_point[i][6][-1]
-                                            for i, _ in enumerate(right_hip_contact_point)])
+                        #######################################
+                        # Sitting height
+                                # if (chest_contact_num + head_contact_num) * left_hip_contact_num * right_hip_contact_num > 0 \
+                                #     and total_contact_number >= self.total_contact_num_min:
+                                upper_body_contact_num = chest_contact_num + head_contact_num + left_hip_contact_num + right_shoulder_contact_num
+                                if upper_body_contact_num * left_hip_contact_num * right_hip_contact_num > 0 \
+                                    and total_contact_number >= self.total_contact_num_min:
+                                    left_hip_height_list = np.array([left_hip_contact_point[i][6][-1]
+                                        for i, _ in enumerate(left_hip_contact_point)])
+                                    right_hip_height_list = np.array([right_hip_contact_point[i][6][-1]
+                                        for i, _ in enumerate(right_hip_contact_point)])
 
-                                        hip_height = 0.5 * (np.average(left_hip_height_list) + np.average(right_hip_height_list))
-                                        
-                                        if hip_height > self.hip_height_min and hip_height < self.hip_height_max:
-                                            # It is classify as a sitting
-                                            sitting_num += 1
-                                            sitting_height = (sitting_height * (sitting_num - 1) + hip_height) / sitting_num
-                                            sitting_joint_score = (sitting_joint_score * (
-                                                        sitting_num - 1) + joint_angle_score) / sitting_num
-                                            sitting_absolute_link_score = (sitting_absolute_link_score * (
-                                                        sitting_num - 1) + absolute_link_state_score) / sitting_num
-                                            sitting_config_score += 1 / (joint_angle_score * absolute_link_state_score)
+                                    hip_height = 0.5 * (np.average(left_hip_height_list) + np.average(right_hip_height_list))
+
+                                    if hip_height > self.hip_height_min and hip_height < self.hip_height_max:
+                                        # It is classify as a sitting
+                                        sitting_num += 1
+                                        sitting_height = (sitting_height * (sitting_num - 1) + hip_height) / sitting_num
+                                        sitting_joint_score = (sitting_joint_score * (
+                                                    sitting_num - 1) + joint_angle_score) / sitting_num
+                                        sitting_absolute_link_score = (sitting_absolute_link_score * (
+                                                    sitting_num - 1) + absolute_link_state_score) / sitting_num
+                                        sitting_config_score += 1 / (joint_angle_score * absolute_link_state_score)
             if sitting_num < 1:
                 continue
 
